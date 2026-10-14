@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Сегментация изображений: от порога до Mask R-CNN и трансформеров</title>
+<style>
+  :root{--bg:#0f1420;--card:#171e2e;--txt:#e6e9f0;--mut:#9aa3b5;--grid:#2a3347;--al:#ff7a59;--ok:#5ad1a1;--bad:#ff5c7a;--ins:#f5c451}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);line-height:1.45}
+  header{padding:20px 28px 8px;max-width:1200px;margin:0 auto}
+  h1{margin:0 0 6px;font-size:22px} h2{margin:0 0 4px;font-size:17px}
+  .sub{color:var(--mut);font-size:14px}
+  .controls{position:sticky;top:0;z-index:5;background:rgba(15,20,32,.97);padding:12px 28px;border-bottom:1px solid var(--grid);display:flex;flex-wrap:wrap;gap:22px;align-items:center;font-size:14px}
+  label{color:var(--mut)} input[type=range]{width:190px;vertical-align:middle;accent-color:var(--al)} label b{color:var(--txt)}
+  select{background:#232c40;color:var(--txt);border:1px solid var(--grid);border-radius:8px;padding:4px 8px;font-size:14px}
+  main{max-width:1200px;margin:0 auto;padding:16px 28px 48px;display:flex;flex-direction:column;gap:18px}
+  .card{background:var(--card);border:1px solid var(--grid);border-radius:14px;padding:16px 18px}
+  .what{font-size:14px;color:var(--mut);margin:0 0 12px} .what b{color:var(--txt)}
+  .ctl{display:flex;flex-wrap:wrap;gap:18px;align-items:center;font-size:14px;margin:0 0 12px;padding:8px 12px;background:#0c111b;border-radius:10px}
+  .pair{display:grid;grid-template-columns:1fr 1fr;gap:14px} .trio{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px} .quad{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+  .pane{background:#0c111b;border-radius:10px;padding:8px} .pane h3{margin:2px 0 6px;font-size:14px;color:var(--mut);text-align:center;font-weight:600}
+  .pane.after h3{color:var(--al)} canvas{display:block;width:100%}
+  .note{font-size:14px;margin-top:10px;padding:10px 12px;background:#0c111b;border-left:3px solid var(--al);border-radius:6px}
+  .legend{display:flex;gap:16px;font-size:13px;color:var(--mut);margin:8px 0 0;flex-wrap:wrap}
+  .sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin-top:12px} td,th{border:1px solid var(--grid);padding:7px 10px;text-align:left;vertical-align:top} th{color:var(--al)} td:first-child{color:var(--mut);white-space:nowrap}
+  dl{font-size:14px;margin:0;columns:2;column-gap:32px} dt{font-weight:600;margin-top:8px;break-after:avoid} dd{margin:2px 0 0;color:var(--mut)}
+  @media(max-width:800px){.pair,.trio{grid-template-columns:1fr}.quad{grid-template-columns:1fr 1fr}dl{columns:1}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Сегментация изображений: покрутим и сравним</h1>
+  <div class="sub">От классических методов и энкодера–декодера (U-Net) к Mask R-CNN (ROIAlign, FPN, Mask head), а затем к YOLO-seg (прототипы масок) и Mask2Former (запросы и masked attention). Все сцены и числа синтетические: они показывают принцип, а не реальную точность моделей. Шум ниже влияет на панели 2 и 3.</div>
+</header>
+<div class="controls">
+  <label>Шум изображения σ: <input id="sig" type="range" min="0" max="0.3" step="0.01" value="0.08"> <b id="sigV">0.08</b></label>
+</div>
+<main>
+
+<div class="card">
+  <h2>1. Типы сегментации: семантическая, экземпляров, панорамная</h2>
+  <p class="what"><b>Простыми словами.</b> На сцене два перекрывающихся автомобиля и человек. <b>Семантическая сегментация</b> (semantic segmentation) даёт класс каждому пикселю: оба автомобиля — одного цвета. <b>Сегментация экземпляров</b> (instance segmentation) разделяет объекты, но фон («stuff») не размечает. <b>Панорамная</b> (panoptic) объединяет оба подхода.</p>
+  <div class="ctl"><label>Тип: <select id="stype"><option value="sem">семантическая</option><option value="inst">экземпляров</option><option value="pan">панорамная</option></select></label><span id="t1" style="color:var(--mut)"></span></div>
+  <div class="pair"><div class="pane"><h3>Изображение (яркость)</h3><canvas id="c_img" data-r="0.625"></canvas></div>
+  <div class="pane after"><h3>Результат сегментации</h3><canvas id="c_t1" data-r="0.625"></canvas></div></div>
+  <div class="legend"><span><i class="sw" style="background:#4c6fd0"></i>небо</span><span><i class="sw" style="background:#6f788c"></i>дорога</span><span><i class="sw" style="background:#ff7a59"></i>автомобиль 1</span><span><i class="sw" style="background:#f5c451"></i>автомобиль 2</span><span><i class="sw" style="background:#5ad1a1"></i>человек</span></div>
+  <div class="note">Ключевое различие: в семантической карте <b>нельзя сосчитать автомобили</b> — это один связный регион. Для подсчёта и трекинга нужны экземпляры. Mask R-CNN, YOLO-seg и Mask2Former умеют это делать.</div>
+</div>
+
+<div class="card">
+  <h2>2. Классика: порог и кластеризация K-средних</h2>
+  <p class="what"><b>Простыми словами.</b> <b>Пороговая сегментация</b> делит пиксели на два класса по яркости. <b>K-средних</b> (K-means) делит на K групп по сходству яркости. Оба метода знают только яркость — «смысла» объекта у них нет. Увеличьте шум: появятся одиночные ошибочные пиксели.</p>
+  <div class="ctl"><label>Порог T: <input id="thr" type="range" min="0" max="1" step="0.01" value="0.5"> <b id="thrV">0.50</b></label><label>K кластеров: <select id="kk"><option>2</option><option>3</option><option selected>4</option><option>5</option></select></label></div>
+  <div class="trio"><div class="pane"><h3>Яркость с шумом</h3><canvas id="c_g" data-r="0.625"></canvas></div>
+  <div class="pane after"><h3 id="h_thr">Порог</h3><canvas id="c_thr" data-r="0.625"></canvas></div>
+  <div class="pane after"><h3 id="h_km">K-средних</h3><canvas id="c_km" data-r="0.625"></canvas></div></div>
+  <div class="note">Автомобиль (яркость 0.62) и дорога (0.35) отличаются слабо, а человек (0.15) темнее дороги. Один порог не разделит все классы. K-средних лучше, но при большом σ границы «рвутся». Нейросети используют контекст и форму, а не только яркость.</div>
+</div>
+
+<div class="card">
+  <h2>3. Энкодер–декодер: что даёт skip-связь (U-Net)</h2>
+  <p class="what"><b>Простыми словами.</b> <b>Энкодер</b> сжимает изображение (pooling), накапливая контекст, но теряет детали. <b>Декодер</b> разворачивает карту обратно. Без <b>skip-связей</b> (copy and crop) границы получаются блочными. U-Net передаёт детали из энкодера напрямую в декодер. Ползунок — число слоёв понижения разрешения.</p>
+  <div class="ctl"><label>Глубина энкодера (число pooling 2×2): <input id="dep" type="range" min="0" max="4" step="1" value="3"> <b id="depV">3 (блок 8×8)</b></label></div>
+  <div class="trio"><div class="pane"><h3>Эталон (ground truth)</h3><canvas id="c_gt" data-r="0.625"></canvas></div>
+  <div class="pane"><h3 id="h_ns">Декодер без skip</h3><canvas id="c_ns" data-r="0.625"></canvas></div>
+  <div class="pane after"><h3 id="h_sk">U-Net со skip-связями</h3><canvas id="c_sk" data-r="0.625"></canvas></div></div>
+  <div class="note">При росте глубины растёт контекст, но без skip-связей падает точность границ (пиксельная точность в заголовках). Со skip-связями мелкие детали возвращаются.</div>
+</div>
+
+<div class="card">
+  <h2>4. Mask R-CNN: ROIPool против ROIAlign</h2>
+  <p class="what"><b>Простыми словами.</b> RPN выдаёт рамку (RoI) с дробными координатами, а карта признаков — сетка с шагом <b>stride</b> пикселей. <b>ROIPool</b> округляет границы RoI до клеток сетки — рамка смещается. <b>ROIAlign</b> координаты не округляет и берёт значения <b>билинейной интерполяцией</b> из 4 соседних клеток. Это важно для масок: сдвиг на несколько пикселей портит границу.</p>
+  <div class="ctl"><label>Stride карты признаков: <input id="str" type="range" min="0" max="3" step="1" value="2"> <b id="strV">16</b></label><label>Сдвиг RoI по x: <input id="rx" type="range" min="0" max="64" step="0.5" value="21.5"> <b id="rxV"></b></label><label>Ширина RoI: <input id="rw" type="range" min="40" max="130" step="1" value="86"> <b id="rwV"></b></label></div>
+  <div class="pair"><div class="pane"><h3>ROIPool: границы округлены до клеток</h3><canvas id="c_pool" data-r="0.56"></canvas></div>
+  <div class="pane after"><h3>ROIAlign: точные границы + билинейная интерполяция</h3><canvas id="c_align" data-r="0.56"></canvas></div></div>
+  <div class="legend"><span><i class="sw" style="background:#e6e9f0"></i>точный RoI</span><span><i class="sw" style="background:#ff5c7a"></i>RoI после округления</span><span><i class="sw" style="background:#5ad1a1"></i>точки выборки (по одной на ячейку 4×4)</span><span><i class="sw" style="background:#f5c451"></i>4 соседние клетки и веса интерполяции</span></div>
+  <div class="note" id="t4"></div>
+</div>
+
+<div class="card">
+  <h2>5. FPN: на каком уровне пирамиды «живёт» объект</h2>
+  <p class="what"><b>Простыми словами.</b> <b>Feature Pyramid Network</b> строит признаки с разным stride: P2 (4), P3 (8), P4 (16), P5 (32). Маленькие объекты берутся с мелких уровней, большие — с крупных. Уровень выбирается по размеру RoI: k = ⌊4 + log₂(√(w·h)/224)⌋.</p>
+  <div class="ctl"><label>Размер объекта (px): <input id="osz" type="range" min="8" max="600" step="1" value="60"> <b id="oszV">60</b></label></div>
+  <div class="pane"><canvas id="c_fpn" data-h="230"></canvas></div>
+  <div class="note" id="t5"></div>
+</div>
+
+<div class="card">
+  <h2>6. YOLO-seg: маска как комбинация прототипов</h2>
+  <p class="what"><b>Простыми словами.</b> YOLO-seg — одностадийная: нет RPN и ROIAlign. Сеть выдаёт общий набор <b>прототипов</b> P (4 карты ниже) и для каждого объекта несколько <b>коэффициентов</b> C. Маска = σ(C · P), затем обрезка по предсказанной рамке. Меняйте коэффициенты: те же прототипы дают разные маски.</p>
+  <div class="ctl"><label>Пресет: <select id="pre"><option value="1,1,0,0">оба объекта</option><option value="1,-1,0,0">левый</option><option value="-1,1,0,0">правый</option></select></label>
+  <label>c₁ <input id="k1" type="range" min="-2" max="2" step="0.05" value="1"></label><label>c₂ <input id="k2" type="range" min="-2" max="2" step="0.05" value="1"></label><label>c₃ <input id="k3" type="range" min="-2" max="2" step="0.05" value="0"></label><label>c₄ <input id="k4" type="range" min="-2" max="2" step="0.05" value="0"></label><label><input id="crop" type="checkbox" checked> обрезка по рамке</label></div>
+  <div class="quad"><div class="pane"><h3>P₁</h3><canvas id="p1" data-r="0.625"></canvas></div><div class="pane"><h3>P₂</h3><canvas id="p2" data-r="0.625"></canvas></div><div class="pane"><h3>P₃ (градиент по x)</h3><canvas id="p3" data-r="0.625"></canvas></div><div class="pane"><h3>P₄ (градиент по y)</h3><canvas id="p4" data-r="0.625"></canvas></div></div>
+  <div class="pair"><div class="pane"><h3>σ(C · P): маска до обрезки</h3><canvas id="c_m1" data-r="0.625"></canvas></div><div class="pane after"><h3>Итоговая маска объекта</h3><canvas id="c_m2" data-r="0.625"></canvas></div></div>
+  <div class="note">Прототипы считаются <b>один раз на изображение</b>, а на каждый объект добавляется лишь вектор из нескольких чисел — поэтому метод быстрый. Рамка (серая) нужна, чтобы убрать «лишнюю» маску соседнего объекта.</div>
+</div>
+
+<div class="card">
+  <h2>7. Mask2Former: запросы и masked attention</h2>
+  <p class="what"><b>Простыми словами.</b> Трансформерный декодер держит N <b>запросов</b> (queries) — по одному на сегмент. Слой за слоем каждый запрос уточняет свою маску. В <b>masked attention</b> запрос смотрит только внутрь маски, предсказанной на предыдущем слое, поэтому область внимания сужается.</p>
+  <div class="ctl"><label>Запрос: <select id="qq"><option value="0">автомобиль 1</option><option value="1">автомобиль 2</option><option value="2">человек</option></select></label><label>Слой декодера: <input id="lay" type="range" min="0" max="6" step="1" value="0"> <b id="layV"></b></label></div>
+  <div class="pair"><div class="pane"><h3>Куда смотрит запрос (область masked attention)</h3><canvas id="c_att" data-r="0.625"></canvas></div><div class="pane after"><h3>Маска запроса после слоя</h3><canvas id="c_mq" data-r="0.625"></canvas></div></div>
+  <div class="note" id="t7"></div>
+</div>
+
+<div class="card">
+  <h2>8. Сравнение подходов</h2>
+  <p class="what">Столбцы — mask AP на COCO по данным статьи Mask R-CNN (ResNet-101-FPN), документации Ultralytics (YOLO11x-seg, 640 px) и статьи Mask2Former (Swin-L). Протоколы оценки разные, поэтому это ориентир.</p>
+  <div class="pane"><canvas id="c_cmp" data-h="190"></canvas></div>
+  <table><tr><th></th><th>Mask R-CNN</th><th>YOLO-seg</th><th>Mask2Former</th></tr>
+  <tr><td>Стадии</td><td>две: RPN → RoI-ветви</td><td>одна</td><td>трансформерный декодер</td></tr>
+  <tr><td>Как получается маска</td><td>Mask head на выровненных RoI (ROIAlign)</td><td>σ(C · P) + обрезка по рамке</td><td>запрос × попиксельные эмбеддинги</td></tr>
+  <tr><td>Задачи</td><td>экземпляры</td><td>экземпляры, детекция</td><td>семантика, экземпляры, панорама</td></tr>
+  <tr><td>Сильная сторона</td><td>базовая модель, много реализаций</td><td>скорость</td><td>качество и универсальность</td></tr></table>
+</div>
+
+<div class="card">
+  <h2>Словарик</h2>
+  <dl>
+    <dt>RoI (Region of Interest)</dt><dd>Область интереса — рамка-кандидат, предложенная RPN.</dd>
+    <dt>RPN (Region Proposal Network)</dt><dd>Сеть предложений регионов, работает на признаках backbone.</dd>
+    <dt>ROIAlign</dt><dd>Выравнивание признаков RoI без округления координат, билинейная интерполяция.</dd>
+    <dt>FPN</dt><dd>Пирамида признаков разного разрешения для объектов разного размера.</dd>
+    <dt>Mask head</dt><dd>Ветвь Mask R-CNN, предсказывающая бинарную маску для каждого RoI.</dd>
+    <dt>Skip-связь</dt><dd>Передача признаков энкодера в декодер (U-Net).</dd>
+    <dt>Прототипы масок</dt><dd>Общие карты, из которых YOLO-seg собирает маски линейной комбинацией.</dd>
+    <dt>Masked attention</dt><dd>Внимание запроса только внутри его текущей маски (Mask2Former).</dd>
+  </dl>
+</div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const GW=48,GH=30,NC=4;
+const CLS=['#4c6fd0','#6f788c','#ff7a59','#5ad1a1'], INS=['#ff7a59','#f5c451','#5ad1a1'], DARK='#1b2335', MEAN=[0.85,0.35,0.62,0.15];
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)), sig=x=>1/(1+Math.exp(-x)), lerp=(a,b,t)=>a+(b-a)*t;
+function rng(s){return()=>{s=(s*1664525+1013904223)%4294967296;return s/4294967296}}
+const R=rng(7);function gauss(){let u=0,v=0;while(!u)u=R();while(!v)v=R();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+const noise=[...Array(GW*GH)].map(gauss);
+/* сцена: класс и номер экземпляра для каждого пикселя */
+const cls=new Uint8Array(GW*GH), inst=new Int8Array(GW*GH).fill(-1);
+const objs=[{c:2,id:0,t:(x,y)=>x>=6&&x<=20&&y>=14&&y<=24},{c:2,id:1,t:(x,y)=>x>=17&&x<=31&&y>=16&&y<=26},{c:3,id:2,t:(x,y)=>((x-39)/3)**2+((y-17)/7)**2<=1}];
+for(let y=0;y<GH;y++)for(let x=0;x<GW;x++){const i=y*GW+x;cls[i]=y<12?0:1;objs.forEach(o=>{if(o.t(x,y)){cls[i]=o.c;inst[i]=o.id}})}
+const cen=objs.map(o=>{let sx=0,sy=0,n=0;for(let i=0;i<GW*GH;i++)if(inst[i]===o.id){sx+=i%GW;sy+=Math.floor(i/GW);n++}return[sx/n,sy/n]});
+const img=()=>{const s=+$('sig').value;return Array.from(cls,(c,i)=>clamp(MEAN[c]+s*noise[i],0,1))};
+
+/* холсты */
+const CV={};
+function sizeAll(){document.querySelectorAll('canvas').forEach(c=>{const d=devicePixelRatio||1,W=c.clientWidth||400,H=c.dataset.h?+c.dataset.h:Math.round(W*(+c.dataset.r));
+ c.width=Math.round(W*d);c.height=Math.round(H*d);c.style.height=H+'px';const g=c.getContext('2d');g.setTransform(d,0,0,d,0,0);CV[c.id]={g,W,H}})}
+function ctx(id){const{g,W,H}=CV[id];g.fillStyle='#0c111b';g.fillRect(0,0,W,H);return{g,W,H}}
+function text(g,s,x,y,col='#9aa3b5',sz=12,al='left'){g.fillStyle=col;g.font=sz+'px system-ui';g.textAlign=al;g.fillText(s,x,y)}
+function field(id,gw,gh,f){const{g,W,H}=ctx(id),cw=W/gw,ch=H/gh;for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){const c=f(x,y);if(c){g.fillStyle=c;g.fillRect(x*cw,y*ch,cw+.5,ch+.5)}}}
+const gray=v=>{const k=Math.round(v*255);return`rgb(${k},${k},${k})`};
+const accuracy=p=>{let n=0;for(let i=0;i<p.length;i++)if(p[i]===cls[i])n++;return Math.round(100*n/p.length)};
+const nearest=v=>{let b=0,d=9;MEAN.forEach((m,k)=>{if(Math.abs(m-v)<d){d=Math.abs(m-v);b=k}});return b};
+function speckle(lab){let n=0;for(let y=0;y<GH;y++)for(let x=0;x<GW;x++){const v=lab[y*GW+x];let nb=0,df=0;[[1,0],[-1,0],[0,1],[0,-1]].forEach(([a,b])=>{const X=x+a,Y=y+b;if(X>=0&&X<GW&&Y>=0&&Y<GH){nb++;if(lab[Y*GW+X]!==v)df++}});if(nb&&df===nb)n++}return n}
+
+/* 1 */
+function draw1(){const I=img(),t=$('stype').value;
+ field('c_img',GW,GH,(x,y)=>gray(I[y*GW+x]));
+ field('c_t1',GW,GH,(x,y)=>{const i=y*GW+x;if(t==='sem')return CLS[cls[i]];if(t==='inst')return inst[i]>=0?INS[inst[i]]:DARK;return inst[i]>=0?INS[inst[i]]:CLS[cls[i]]});
+ $('t1').textContent={sem:'Классов: 4. Два автомобиля — один класс «автомобиль».',inst:'Экземпляров: 3 (автомобиль 1, автомобиль 2, человек). Фон не размечен.',pan:'Фон по классам + 3 экземпляра объектов.'}[t]}
+/* 2 */
+function kmeans(v,K){let mn=Math.min(...v),mx=Math.max(...v),c=[...Array(K)].map((_,k)=>mn+(mx-mn)*(k+.5)/K),lab=new Uint8Array(v.length);
+ for(let it=0;it<12;it++){v.forEach((x,i)=>{let b=0,d=9;c.forEach((m,k)=>{if(Math.abs(m-x)<d){d=Math.abs(m-x);b=k}});lab[i]=b});
+  c=c.map((m,k)=>{let s=0,n=0;v.forEach((x,i)=>{if(lab[i]===k){s+=x;n++}});return n?s/n:m})}return lab}
+function draw2(){const I=img(),T=+$('thr').value,K=+$('kk').value;
+ field('c_g',GW,GH,(x,y)=>gray(I[y*GW+x]));
+ const th=I.map(v=>v>T?1:0),km=kmeans(I,K),pal=['#1b2a4a','#3b6fd6','#5ad1a1','#f5c451','#ff7a59'];
+ field('c_thr',GW,GH,(x,y)=>th[y*GW+x]?'#f5c451':DARK);field('c_km',GW,GH,(x,y)=>pal[km[y*GW+x]]);
+ $('h_thr').textContent='Порог T='+T.toFixed(2)+' (одиночных пикселей: '+speckle(th)+')';
+ $('h_km').textContent='K-средних, K='+K+' (одиночных пикселей: '+speckle(km)+')'}
+/* 3 */
+function draw3(){const I=img(),k=+$('dep').value,b=1<<k,bw=Math.ceil(GW/b),bh=Math.ceil(GH/b),mean=[];
+ for(let by=0;by<bh;by++)for(let bx=0;bx<bw;bx++){let s=0,n=0;for(let y=by*b;y<Math.min(GH,by*b+b);y++)for(let x=bx*b;x<Math.min(GW,bx*b+b);x++){s+=I[y*GW+x];n++}mean.push(nearest(s/n))}
+ const p1=new Uint8Array(GW*GH),p2=new Uint8Array(GW*GH);
+ for(let y=0;y<GH;y++)for(let x=0;x<GW;x++){const bx=Math.floor(x/b),by=Math.floor(y/b),i=y*GW+x;p1[i]=mean[by*bw+bx];
+  const cand=new Set();for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const X=bx+dx,Y=by+dy;if(X>=0&&X<bw&&Y>=0&&Y<bh)cand.add(mean[Y*bw+X])}
+  let best=p1[i],d=9;cand.forEach(c=>{if(Math.abs(MEAN[c]-I[i])<d){d=Math.abs(MEAN[c]-I[i]);best=c}});p2[i]=best}
+ field('c_gt',GW,GH,(x,y)=>CLS[cls[y*GW+x]]);field('c_ns',GW,GH,(x,y)=>CLS[p1[y*GW+x]]);field('c_sk',GW,GH,(x,y)=>CLS[p2[y*GW+x]]);
+ $('depV').textContent=k+' (блок '+b+'×'+b+')';$('h_ns').textContent='Декодер без skip — точность '+accuracy(p1)+'%';$('h_sk').textContent='U-Net со skip — точность '+accuracy(p2)+'%'}
+/* 4 */
+const STR=[4,8,16,32],IW=256;
+function draw4(){const s=STR[+$('str').value],x0=+$('rx').value,w=+$('rw').value,y0=24.3,h=w*0.7;$('strV').textContent=s;$('rxV').textContent=x0+' px';$('rwV').textContent=w+' px';
+ const bx=Math.round(x0/s)*s,by=Math.round(y0/s)*s,bx1=Math.round((x0+w)/s)*s,by1=Math.round((y0+h)/s)*s;
+ const err=Math.max(Math.abs(bx-x0),Math.abs(by-y0),Math.abs(bx1-(x0+w)),Math.abs(by1-(y0+h)));
+ ['c_pool','c_align'].forEach(id=>{const{g,W,H}=ctx(id),sc=(W-16)/IW;g.save();g.translate(8,8);
+  g.strokeStyle='#2a3347';g.lineWidth=1;for(let x=0;x<=IW;x+=s){g.beginPath();g.moveTo(x*sc,0);g.lineTo(x*sc,H);g.stroke()}for(let y=0;y*1<=H/sc;y+=s){g.beginPath();g.moveTo(0,y*sc);g.lineTo(IW*sc,y*sc);g.stroke()}
+  if(id==='c_pool'){g.fillStyle='rgba(255,92,122,.2)';g.fillRect(bx*sc,by*sc,(bx1-bx)*sc,(by1-by)*sc);g.strokeStyle='#ff5c7a';g.lineWidth=3;g.strokeRect(bx*sc,by*sc,(bx1-bx)*sc,(by1-by)*sc)}
+  g.strokeStyle='#e6e9f0';g.lineWidth=1.5;g.strokeRect(x0*sc,y0*sc,w*sc,h*sc);
+  if(id==='c_align'){const bwid=w/4,bh=h/4;g.strokeStyle='rgba(255,122,89,.6)';for(let i=1;i<4;i++){g.beginPath();g.moveTo((x0+i*bwid)*sc,y0*sc);g.lineTo((x0+i*bwid)*sc,(y0+h)*sc);g.moveTo(x0*sc,(y0+i*bh)*sc);g.lineTo((x0+w)*sc,(y0+i*bh)*sc);g.stroke()}
+   g.fillStyle='#5ad1a1';for(let i=0;i<4;i++)for(let j=0;j<4;j++){g.beginPath();g.arc((x0+(i+.5)*bwid)*sc,(y0+(j+.5)*bh)*sc,3,0,7);g.fill()}
+   const px=x0+1.5*bwid,py=y0+1.5*bh,fx=px/s-.5,fy=py/s-.5,i0=Math.floor(fx),j0=Math.floor(fy),dx=fx-i0,dy=fy-j0;
+   [[0,0,(1-dx)*(1-dy)],[1,0,dx*(1-dy)],[0,1,(1-dx)*dy],[1,1,dx*dy]].forEach(([a,c,wt])=>{const cx=(i0+a)*s,cy=(j0+c)*s;g.strokeStyle='#f5c451';g.lineWidth=2;g.strokeRect(cx*sc,cy*sc,s*sc,s*sc);
+    if(s*sc>26)text(g,Math.round(wt*100)+'%',(cx+s/2)*sc,(cy+s/2)*sc+4,'#f5c451',12,'center')});
+   g.fillStyle='#f5c451';g.beginPath();g.arc(px*sc,py*sc,4.5,0,7);g.fill()}
+  g.restore()});
+ $('t4').innerHTML='<b>ROIPool:</b> границы сдвинуты на '+err.toFixed(1)+' px исходного изображения (до '+s/2+' px при данном stride) — это ошибка маски у границы. <b>ROIAlign:</b> сдвиг 0 px; жёлтые клетки — 4 соседа точки, их вклад — билинейные веса. Для малых объектов и большого stride разница заметнее всего.'}
+/* 5 */
+function draw5(){const sz=+$('osz').value,k=clamp(Math.floor(4+Math.log2(sz/224)),2,5);$('oszV').textContent=sz;
+ const{g,W,H}=ctx('c_fpn'),lv=[2,3,4,5],left=150,mx=Math.max(sz/4,16),sc=(W-left-90)/mx;
+ lv.forEach((L,i)=>{const s=4<<i,cells=sz/s,y=18+i*46,on=L===k;g.fillStyle=on?'rgba(255,122,89,.15)':'transparent';g.fillRect(0,y-10,W,40);
+  text(g,'P'+L+' (stride '+s+')',10,y+14,on?'#ff7a59':'#9aa3b5',14);g.fillStyle=on?'#ff7a59':(cells<1?'#ff5c7a':'#4a5366');g.fillRect(left,y,Math.max(2,cells*sc),22);
+  text(g,cells.toFixed(1)+' клеток по стороне'+(on?'  ← выбран':''),left+Math.max(2,cells*sc)+8,y+16,'#e6e9f0',12)});
+ const c32=sz/32;text(g,'Без FPN (один уровень, stride 32): '+c32.toFixed(1)+' клеток'+(c32<1?' — объект меньше одной клетки':''),10,H-10,c32<1?'#ff5c7a':'#9aa3b5',13);
+ $('t5').innerHTML='Объект '+sz+'×'+sz+' px назначается уровню <b>P'+k+'</b> (stride '+(4<<(k-2))+'). Малые объекты уходят на P2 с мелким шагом, поэтому детали сохраняются; на единственной карте со stride 32 они «растворяются».'}
+/* 6 */
+const PW=32,PH=20,P=[(x,y)=>Math.exp(-((x-10)**2+(y-10)**2)/40),(x,y)=>Math.exp(-((x-22)**2+(y-10)**2)/40),(x,y)=>x/31,(x,y)=>y/19];
+function draw6(){const k=[1,2,3,4].map(i=>+$('k'+i).value);
+ P.forEach((f,i)=>field('p'+(i+1),PW,PH,(x,y)=>`rgba(255,122,89,${f(x,y)})`));
+ const m=(x,y)=>sig(5*k.reduce((s,c,i)=>s+c*P[i](x,y),0)-2.5),inBox=(x,y)=>x>=2&&x<=17&&y>=2&&y<=18;
+ field('c_m1',PW,PH,(x,y)=>`rgba(90,209,161,${m(x,y)})`);
+ field('c_m2',PW,PH,(x,y)=>{const v=m(x,y),ok=!$('crop').checked||inBox(x,y);return ok?`rgba(90,209,161,${v})`:null});
+ const{g,W,H}=CV.c_m2,cw=W/PW,ch=H/PH;g.strokeStyle='#9aa3b5';g.setLineDash([5,4]);g.lineWidth=1.5;g.strokeRect(2*cw,2*ch,16*cw,17*ch);g.setLineDash([])}
+/* 7 */
+function draw7(){const q=+$('qq').value,l=+$('lay').value,t=l/6,[cx,cy]=cen[q];$('layV').textContent=l===0?'0 (инициализация)':l;
+ const lg=(x,y,L)=>{const tt=L/6,blob=2-((x-cx)**2+(y-cy)**2)/30,gt=inst[y*GW+x]===q?4:-4;return lerp(blob,gt,tt)};
+ const att=(x,y)=>l===0?true:lg(x,y,l-1)>0;
+ field('c_att',GW,GH,(x,y)=>att(x,y)?CLS[cls[y*GW+x]]:DARK);
+ field('c_mq',GW,GH,(x,y)=>{const p=sig(lg(x,y,l));return`rgba(255,122,89,${p})`});
+ let na=0,nm=0;for(let y=0;y<GH;y++)for(let x=0;x<GW;x++){if(att(x,y))na++;if(lg(x,y,l)>0)nm++}
+ let inter=0,gtn=0;for(let i=0;i<GW*GH;i++){const gm=inst[i]===q,pm=lg(i%GW,Math.floor(i/GW),l)>0;if(gm)gtn++;if(gm&&pm)inter++}
+ const iou=inter/(gtn+nm-inter);
+ $('t7').innerHTML='Запрос смотрит на <b>'+Math.round(100*na/(GW*GH))+'%</b> пикселей изображения. Совпадение маски с эталоном (IoU): <b>'+iou.toFixed(2)+'</b>. На слое 0 внимание — всё изображение, а к последним слоям остаётся почти только сам объект.'}
+/* 8 */
+function draw8(){const{g,W,H}=ctx('c_cmp'),d=[['Mask R-CNN (R101-FPN)',35.7,'#9aa3b5'],['YOLO11x-seg (640 px)',43.8,'#f5c451'],['Mask2Former (Swin-L)',50.1,'#ff7a59']];
+ d.forEach(([n,v,c],i)=>{const y=16+i*52,w=(W-260)*v/55;text(g,n,10,y+22,'#e6e9f0',13);g.fillStyle=c;g.fillRect(190,y,w,30);text(g,v+' mask AP',190+w+8,y+21,'#e6e9f0',13)})}
+
+function render(){$('sigV').textContent=(+$('sig').value).toFixed(2);$('thrV').textContent=(+$('thr').value).toFixed(2);draw1();draw2();draw3();draw4();draw5();draw6();draw7();draw8()}
+$('pre').addEventListener('change',e=>{e.target.value.split(',').forEach((v,i)=>$('k'+(i+1)).value=v);render()});
+document.addEventListener('input',render);document.addEventListener('change',render);
+addEventListener('resize',()=>{sizeAll();render()});
+sizeAll();render();
+</script>
+</body>
+</html>
